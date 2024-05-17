@@ -246,19 +246,19 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
 
         msg_id = esp_mqtt_client_publish(client, "/ledrgb/mode", "data_3", 0, 1, 0);
-        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+        //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
         
-        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos0", 0);
-        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+        //msg_id = esp_mqtt_client_subscribe(client, "/topic/qos0", 0);
+        //ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
 
-        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos1", 1);
-        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+        //msg_id = esp_mqtt_client_subscribe(client, "/topic/qos1", 1);
+        //ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
 
-        msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
-        ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
+        //msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
+        //ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
         break;
     case MQTT_EVENT_DISCONNECTED:
-        ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
+        //ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
         break;
 
     case MQTT_EVENT_SUBSCRIBED:
@@ -576,42 +576,42 @@ static void ledRGB_task(void *arg)
             {   
                 case 0:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "8", 0, 0, 0);
-                    ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+                    //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
                     handle_RgbLedState(&rgbLed1,RGBLED_OFF);
                     break;
                 case 1:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "1", 0, 0, 0);
-                    ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+                    //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
                     handle_RgbLedState(&rgbLed1,RGBLED_RED);
                     break;
                 case 2:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "2", 0, 0, 0);
-                    ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+                    //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
                     handle_RgbLedState(&rgbLed1,RGBLED_GREEN);
                     break;
                 case 3:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "3", 0, 0, 0);
-                    ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+                    //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
                     handle_RgbLedState(&rgbLed1,RGBLED_BLUE);
                     break;
                 case 4:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "4", 0, 0, 0);
-                    ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+                    //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
                     handle_RgbLedState(&rgbLed1,RGBLED_YELLOW);
                     break;
                 case 5:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "5", 0, 0, 0);
-                    ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+                    //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
                     handle_RgbLedState(&rgbLed1,RGBLED_CYAN);
                     break;
                 case 6:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "6", 0, 0, 0);
-                    ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+                    //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
                     handle_RgbLedState(&rgbLed1,RGBLED_PURPLE);
                     break;
                 case 7:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "7", 0, 0, 0);
-                    ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+                    //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
                     handle_RgbLedState(&rgbLed1,RGBLED_WHITE);
                     break;
                 default:
@@ -705,10 +705,10 @@ static void handleLedSwMode_task(void *arg) //control led driver using data from
             blink_led();
 
             msg_id = esp_mqtt_client_publish(client, "/ledrgb/mode/", "0", 0, 0, 0);
-            ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+            //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
 
             msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "8", 0, 0, 0);
-            ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+            //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
             switch(ctrlData[0])
             {   
                 case '1':
@@ -729,7 +729,7 @@ static void handleLedSwMode_task(void *arg) //control led driver using data from
             {   
                 case 1: 
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/mode/", "1", 0, 0, 0);
-                    ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+                    //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
                     gpio_set_level(GPIO_NRLED,1);
                     gpio_set_level(GPIO_NBLED,0);
                     gpio_set_level(GPIO_NGLED,0);
@@ -739,10 +739,10 @@ static void handleLedSwMode_task(void *arg) //control led driver using data from
                     break;
                 case 2:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/mode/", "2", 0, 0, 0);
-                    ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+                    //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
 
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "9", 0, 0, 0); //change app to rgb picture
-                    ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+                    //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
                     //thuc hien color spectrum tai day
                     handleColorSpectr(); //callback funct color spectrum
                     break;
@@ -789,13 +789,11 @@ void app_main(void)
     mqttInit();
     uart_init();
     gpio_init();
-    /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
-     * Read "Establishing Wi-Fi or Ethernet Connection" section in
-     * examples/protocols/README.md for more information about this function.
-     */
+
     ESP_ERROR_CHECK(example_connect());
 
     mqtt_app_start();
+
     xTaskCreate (ledRGB_task,"ledRgb_task", ECHO_TASK_STACK_SIZE, NULL, 10, NULL);
     xTaskCreate(uart_task, "uart_echo_task", ECHO_TASK_STACK_SIZE, NULL, 10, NULL);
     xTaskCreate(handleLedSwMode_task, "handle_LEDdriver_task", ECHO_TASK_STACK_SIZE, NULL, 10, NULL);
