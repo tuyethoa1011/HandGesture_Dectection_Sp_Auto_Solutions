@@ -18,6 +18,8 @@ from threading import Thread
 
 from gpiozero import LED
 
+#uart permission: os.system("sudo chmod a+rw /dev/serial0")
+
 redNoticeLed = LED(19) #GPIO Led canh bao viec su dung 2 tay de nhan dien
 firstBitLed = LED(26) 
 secondBitLed = LED(27) 
@@ -25,6 +27,8 @@ thirdBitLed = LED(25)
 fourthBitLed = LED(24)
 leftHandLed = LED(13)
 rightHandLed = LED(22)
+
+bootLed = LED(16)
 
 picam2 = Picamera2()
 picam2.configure(picam2.create_preview_configuration(main={"format": 'RGB888', "size": (640, 480)}))
@@ -48,7 +52,7 @@ righthand_value = ''
 
 
 ser = serial.Serial(
-	port = '/dev/ttyAMA0',
+	port = '/dev/serial0',
 	baudrate = 115200,
 	parity = serial.PARITY_NONE,
 	stopbits = serial.STOPBITS_ONE,
@@ -56,8 +60,11 @@ ser = serial.Serial(
 	timeout = 1
 )
 
+#ser = serial.Serial ("/dev/serial0", 115200)    #Open port with baud rate
+
 #Bien co
 ledFlag = 0
+bootFlag = 0
 
 ############################################   Start Left Hand   ####################################################################
 # Hàm nhận diện cử chỉ tay trái
@@ -313,7 +320,7 @@ def transmitLHData(): #LH: LeftHand
           thirdBitLed.on()
           fourthBitLed.off()
           
-          ser.write(str.encode('5'))
+          ser.write(str.encode('6'))
         elif lefthand_value == 6:
           leftHandLed.on()
           rightHandLed.off()
@@ -323,7 +330,7 @@ def transmitLHData(): #LH: LeftHand
           thirdBitLed.on()
           fourthBitLed.off()
           
-          ser.write(str.encode('6'))
+          ser.write(str.encode('5'))
         elif lefthand_value == 7:
           leftHandLed.on()
           rightHandLed.off()
@@ -421,7 +428,7 @@ def transmitRHData(): #RH: RightHand
           thirdBitLed.on()
           fourthBitLed.off()
           
-          ser.write(str.encode('5'))
+          ser.write(str.encode('6'))
         elif righthand_value == 6:
           leftHandLed.off()
           rightHandLed.on()
@@ -431,7 +438,7 @@ def transmitRHData(): #RH: RightHand
           thirdBitLed.on()
           fourthBitLed.off()
           
-          ser.write(str.encode('6'))
+          ser.write(str.encode('5'))
         elif righthand_value == 7:
           leftHandLed.off()
           rightHandLed.on()
@@ -471,6 +478,10 @@ thread2 = Thread(target = transmitRHData)
 thread1.start()
 thread2.start()
 
+if bootFlag == 0:
+  bootLed.on()
+  bootFlag = 1
+
 while True:
     tStart=time.time()
     frame = picam2.capture_array()
@@ -490,7 +501,7 @@ while True:
         ledFlag = 0
         lefthand_value = taytrai()
         righthand_value  = tayphai()
-        print(lefthand_value, ' ', righthand_value)
+        #print(lefthand_value, ' ', righthand_value)
     if cv2.waitKey(1) == ord("q"):
         break
     tEnd=time.time()
