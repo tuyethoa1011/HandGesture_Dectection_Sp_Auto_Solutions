@@ -123,6 +123,7 @@ void connect_to_broker(){
 }
 //Debug section - Serial.print()..
 int countState = 0;
+int initStateFlg = 0;
 //int ready = 1;
 void callback(char* topic, byte *payload, unsigned int length) {
   //Serial.println("-------new message from broker-----");
@@ -157,69 +158,100 @@ void callback(char* topic, byte *payload, unsigned int length) {
           }
           break;
         case 1: //control servo state
-          if((char)payload[0] == '0')
+          if(initStateFlg == 0)
           {
-            Serial.println("S0");
-            MyServo.write(0);
-          } else if ((char)payload[0] == '1')
+            if((char)payload[0] == '0')
+            {
+              initStateFlg = 1;
+            }
+          } else if (initStateFlg == 1)
           {
-            Serial.println("S1");
-            MyServo.write(90);
-          } else if ((char)payload[0] == '2')
-          {
-            Serial.println("S2");
-            MyServo.write(180);
-          } else if ((char)payload[0] == '8')
-          {
-            Serial.println("back to dashboard");
-            countState = 0;
-            //MyServo.write(180);
-          } 
+            if((char)payload[0] == '0')
+            {
+              Serial.println("S0");
+              MyServo.write(0);
+            } else if ((char)payload[0] == '1')
+            {
+              Serial.println("S1");
+              MyServo.write(90);
+            } else if ((char)payload[0] == '2')
+            {
+              Serial.println("S2");
+              MyServo.write(180);
+            } else if ((char)payload[0] == '8')
+            {
+              Serial.println("back to dashboard");
+              countState = 0;
+              initStateFlg= 0;
+              //MyServo.write(180);
+            } 
+          }
+         
           break;
         case 2: //conrol led state
-          if((char)payload[0] == '0') //turn on led
+          if(initStateFlg == 0)
           {
-            Serial.println("off");
-            digitalWrite(led, LOW); //- có thời gian thì add rồi enable hoạt động cho đèn xe sau
-          } else if ((char)payload[0] == '1') //turn off led
+            if((char)payload[0] == '0')
+            {
+              initStateFlg = 1;
+            }
+          } else if (initStateFlg == 1)
           {
-            Serial.println("on");
-            digitalWrite(led, HIGH);
-          } else if ((char)payload[0] == '8')
-          {
-            Serial.println("back to dashboard");
-            countState = 0;
-          //MyServo.write(180);
+            if((char)payload[0] == '0') //turn on led
+            {
+              Serial.println("off");
+              digitalWrite(led, LOW); //- có thời gian thì add rồi enable hoạt động cho đèn xe sau
+            } else if ((char)payload[0] == '1') //turn off led
+            {
+              Serial.println("on");
+              digitalWrite(led, HIGH);
+            } else if ((char)payload[0] == '8')
+            {
+              Serial.println("back to dashboard");
+              countState = 0;
+              initStateFlg= 0;
+            //MyServo.write(180);
+            }
           }
           break;
         case 3: //control motor DC
-          if((char)payload[0] == '0') //backward
+          if(initStateFlg == 0)
           {
-            Serial.println("B");
-            BACKWARD();
-          } else if ((char)payload[0] == '1') //forward
+            if((char)payload[0] == '0')
+            {
+              initStateFlg = 1;
+            }
+          } else if (initStateFlg == 1)
           {
-            Serial.println("F");
-            FORWARD();
-          } else if ((char)payload[0] == '2') //turn left
-          {
-            Serial.println("L");
+            if((char)payload[0] == '0') //backward
+            {
+              Serial.println("B");
+              BACKWARD();
+            } else if ((char)payload[0] == '1') //forward
+            {
+              Serial.println("F");
+              FORWARD();
+            } else if ((char)payload[0] == '2') //turn left
+            {
+              Serial.println("L");
 
-            TURN_LEFT();
-          } else if ((char)payload[0] == '3') //turn right
-          {
-            Serial.println("R");
+              TURN_LEFT();
+            } else if ((char)payload[0] == '3') //turn right
+            {
+              Serial.println("R");
 
-            TURN_RIGHT();
-          } else if ((char)payload[0] == '4') //stop motor
-          {
-            Serial.println("S");
+              TURN_RIGHT();
+            } else if ((char)payload[0] == '4') //stop motor
+            {
+              Serial.println("S");
 
-            STOP();
-          } else if ((char)payload[0] == '8')
-          {
-            Serial.println("back to dashboard");
-            countState = 0;
+              STOP();
+            } else if ((char)payload[0] == '8')
+            {
+              Serial.println("back to dashboard");
+              countState = 0;
+              initStateFlg= 0;
+            }
           }
           break;
         }
