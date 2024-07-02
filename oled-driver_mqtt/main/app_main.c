@@ -1,83 +1,53 @@
-/* MQTT (over TCP) Example
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
+/*
+    Lưu ý: OLED driver không hỗ trợ lưu dialog vào Flash vì nó không phải mục tiêu chính hướng đến cho đề tài (Driver chỉ là phụ có chức năng là được)
+    Ý cần nếu phản biện hỏi sao không làm Flash như driver kia:
+    1. Ko phải mục tiêu chính của mô hình, driver sinh ra chỉ để chứng minh việc nhận lệnh từ thiết bị nhận diện mà thực hiện hành vi.
+    2. Lưu vào Flash sẽ gây tốn bộ nhớ, đọc/ ghi flash gây tốn năng lượng, việc lưu trữ đoạn hội thoại người dùng điều chỉnh là ko cần thiết vì nó có thể đúng tại thời điểm đó nhưng tại thời điểm khác thì không. Vẫn nên giữ các câu thoại thường gặp thông thường mặc định sau khi tắt hệ thống.
 */
 #include <stdio.h>
-
 #include <stdint.h>
-
 #include <stddef.h>
-
 #include <string.h>
-
 #include "esp_wifi.h"
-
 #include "esp_system.h"
-
 #include "nvs_flash.h"
-
 #include "esp_event.h"
-
 #include "esp_netif.h"
-
 #include "protocol_examples_common.h"
 
-
-
 #include "freertos/FreeRTOS.h"
-
 #include "freertos/task.h"
-
 #include "freertos/semphr.h"
-
 #include "freertos/queue.h"
 
-
-
 #include "lwip/sockets.h"
-
 #include "lwip/dns.h"
-
 #include "lwip/netdb.h"
 
-
-
 #include "esp_log.h"
-
 #include "esp_err.h"
-
 #include "mqtt_client.h"
 
 
-
 #include "driver/uart.h"
-
 #include "driver/gpio.h"
-
 #include "sdkconfig.h"
 
-
 #include <inttypes.h>
-
 #include "esp_system.h"
-
 #include "nvs_flash.h"
-
 #include "nvs.h"
+
+#include "esp_timer.h"
+
+#define LED_CTRL_PIN 27
+#define EN_BTN_PIN 33
 
 //------I2C LCD lib -----
 
 #include "esp_log.h"
-
 #include "driver/i2c.h"
-
 #include "ssd1306.h"
-
-static const char *TAG = "OLED_DRIVER";
 
 //Chân được cấu hình dựa trên KIT ESP được sử dụng (Current: ESP32-S2 AI Thinker)
 #define TXD_PIN (GPIO_NUM_17)
@@ -121,13 +91,13 @@ static esp_mqtt_client_handle_t client;
 static int msg_id;
 char read_topic[20], read_data[100];
 esp_mqtt_event_handle_t event;
-
-uint8_t ctrlData[1] = {'1'}; //default init value 
-
+static const char *TAG = "OLED_WIFI_MODULE";
+uint8_t ctrlData[1] = {'0'}; //default init value 
+uint8_t ctrlData_serial[1] = {'0'}; //default init value 
 
 uint8_t clrFlg = 0;
 
-uint8_t bufferText1[100] = "Hello";
+uint8_t bufferText1[100] = "Ngu ngon!";
 uint8_t bufferText2[100] = "Chao buoi trua!";
 uint8_t bufferText3[100] = "Chao buoi toi!";
 uint8_t bufferText4[100] = "Ban an sang chua?";
@@ -136,28 +106,123 @@ uint8_t bufferText6[100] = "Ban an toi chua?";
 uint8_t bufferText7[100] = "Di an chung khong?";
 uint8_t bufferText8[100] = "Di choi khong?";
 
+#define LED_PIN  27
+#define EN_BUTTON_PIN  33
 
-/*****************************************MQTT FUNCT BEGIN***************************************************************************/
-static void mqttInit(void)
+//button sẽ có task thay đổi biến trạng thái nút bấm nhờ vào việc nhấn cứ mỗi lần nhận lệnh bấm nút thì đảo trạng thái 
+//enable - disable
+
+uint8_t buttonState = 0;
+uint8_t btn_current = 0;
+uint8_t btn_last = 0;
+uint8_t btn_filter = 0;
+uint8_t is_debouncing;
+uint32_t time_deboune;
+uint32_t time_start_press;
+uint8_t is_press_timeout;
+
+uint8_t ctrlSwitch = 0; //0 disable 1 enable
+uint8_t enableNoticeData = '4';
+uint8_t disableNoticeData = '1';
+/*****************************************UART FUNCT BEGIN***************************************************************************/
+/*---------------------------------------------------------------
+        UART General Functions
+---------------------------------------------------------------*/
+void uart_init(void)
 {
-    ESP_LOGI(TAG, "[APP] Startup..");
-    ESP_LOGI(TAG, "[APP] Free memory: %" PRIu32 " bytes", esp_get_free_heap_size());
-    ESP_LOGI(TAG, "[APP] IDF version: %s", esp_get_idf_version());
+    //UART driver
+    /* Configure parameters of an UART driver,
+     * communication pins and install the driver */
+    uart_config_t uart_config = {
+        .baud_rate = ECHO_UART_BAUD_RATE,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    int intr_alloc_flags = 0;
 
-    esp_log_level_set("*", ESP_LOG_INFO);
-    esp_log_level_set("mqtt_client", ESP_LOG_VERBOSE);
-    esp_log_level_set("mqtt_example", ESP_LOG_VERBOSE);
-    esp_log_level_set("transport_base", ESP_LOG_VERBOSE);
-    esp_log_level_set("esp-tls", ESP_LOG_VERBOSE);
-    esp_log_level_set("transport", ESP_LOG_VERBOSE);
-    esp_log_level_set("outbox", ESP_LOG_VERBOSE);
+#if CONFIG_UART_ISR_IN_IRAM
+    intr_alloc_flags = ESP_INTR_FLAG_IRAM;
+#endif
 
-    ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE * 2, 0, 0, NULL, intr_alloc_flags));
+    ESP_ERROR_CHECK(uart_param_config(ECHO_UART_PORT_NUM, &uart_config));
+    ESP_ERROR_CHECK(uart_set_pin(ECHO_UART_PORT_NUM, ECHO_TEST_TXD, ECHO_TEST_RXD, ECHO_TEST_RTS, ECHO_TEST_CTS));
 }
+/*---------------------------------------------------------------
+        UART FreeRTOS Task Function
+---------------------------------------------------------------*/
+static void uart_task(void *arg) //recieve data from handmodule
+{
+    // Configure a temporary buffer for the incoming data
+    uint8_t *data = (uint8_t *) malloc(BUF_SIZE);
 
+    while (1) {
+        // Read data from the UART
+        int len = uart_read_bytes(ECHO_UART_PORT_NUM, data, (BUF_SIZE - 1), 20 / portTICK_PERIOD_MS);
+        // Write data back to the UART
+        uart_write_bytes(ECHO_UART_PORT_NUM, (const char *) data, len);
+        if (len) {
+            data[len] = '\0';
 
+            if(data[0] == '0'||data[0] == '1'||data[0] == '2'||data[0] == '3'||data[0] == '4'||data[0] == '5'||data[0] == '6'||data[0] == '7'||data[0] == '8')
+            {
+                strcpy((char*)ctrlData_serial,(char*)data);
+                ESP_LOGI(TAG, "Ctrl data serial: %s", (char*)ctrlData_serial);
+
+                switch (ctrlSwitch)
+                {
+                    case 0:
+                    /* code - viec enable/disable nhan tin hieu tu ben thiet bi dieu khien de bao hieu
+                        1. init gpio chan den
+                        2. on off den tai day
+                    */
+                    //off den enable
+                        break;
+                    case 1:
+                        //copy chuỗi vừa nhận được vào control Data
+                        strcpy((char*)ctrlData,(char*)ctrlData_serial);
+                        ESP_LOGI(TAG, "Ctrl data send switch: %s", (char*)ctrlData);
+                         //in ra debug thử xem nhận được đúng dữ liệu không
+                        /* code */
+                        break;
+                    default: //error case
+                        break;
+                }
+                //msg_id = esp_mqtt_client_publish(client, "/device/oled/",(const char*)ctrlData, 0, 0, 0); //test  transmission
+                if(strcmp((const char*)read_topic,"/device/signal/")==0) //nhận tín hiệu từ thiết bị điều khiển
+                {   
+                    //off đèn rgb
+                    if(strcmp((const char*)read_data,"1")==0) //chuẩn tín hiệu disable chung cho tất cả các thiết bị - mỗi thiết bị nên có tín hiệu off riêng
+                    {
+                        //do nothing
+                    }else if (strcmp((const char*)read_data,"4")==0) //off xe * dieu chinh sau phan bien
+                    {
+
+                    } else if (strcmp((const char*)read_data,"5")==0) // off oled *dieu chinh sau phan bien
+                    {
+
+                    }
+                    else if (strcmp((const char*)read_data,"2")==0)
+                    {
+                        //thực hiện gửi lệnh điều khiển đến xe
+                        msg_id = esp_mqtt_client_publish(client, "/device/car/",(const char*)ctrlData_serial, 0, 0, 0);
+                    } else if(strcmp((const char*)read_data,"3")==0)
+                    {
+                        //thực hiện gửi lệnh điều khiển đến đèn
+                        msg_id = esp_mqtt_client_publish(client, "/device/ledrgb/",(const char*)ctrlData_serial, 0, 0, 0);
+                    }
+                   
+                }       
+            }
+        }
+        vTaskDelay(300/portTICK_PERIOD_MS);
+    }
+}
+/*****************************************UART FUNCT END***************************************************************************/
+/*****************************************MQTT FUNCT BEGIN***************************************************************************/
 static void log_error_if_nonzero(const char *message, int error_code)
 {
     if (error_code != 0) {
@@ -165,16 +230,6 @@ static void log_error_if_nonzero(const char *message, int error_code)
     }
 }
 
-/*
- * @brief Event handler registered to receive MQTT events
- *
- *  This function is called by the MQTT client event loop.
- *
- * @param handler_args user data registered to the event.
- * @param base Event base for the handler(always MQTT Base in this example).
- * @param event_id The id for the received event.
- * @param event_data The data for the event, esp_mqtt_event_handle_t.
- */
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id=%" PRIi32 "", base, event_id);
@@ -184,6 +239,13 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+		
+		msg_id = esp_mqtt_client_subscribe(client, "/device/signal/", 0);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+        //đăng ký topic nhận dữ liệu từ thiết bị wifi phát gói tin
+        msg_id = esp_mqtt_client_subscribe(client, "/device/oled/", 0);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
 
         //msg_id = esp_mqtt_client_publish(client, "/ledrgb/mode", "data_3", 0, 1, 0);
         //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
@@ -273,7 +335,7 @@ void mqtt_app_start(void)
         },
         .credentials = {
             .username = "Jw92hp0jnKbNhP0aN4wcJMQUE5emGzVdVU618Ualu9YzONzpHTsev6ZY218yqTA9",
-            .client_id = "LED-driver_esp32",
+            .client_id = "OLED_Pi_Wifi_esp32",
         }, 
     };
 
@@ -302,58 +364,94 @@ static esp_err_t i2c_master_init(void)
     return i2c_driver_install(i2c_master_port, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
 }
 //----- I2C LCD essential function -----
-
 /*---------------------------------------------------------------
-        UART General Functions
+        Button Functions
 ---------------------------------------------------------------*/
-void uart_init(void)
+void btn_pressing_callback()
 {
-    //UART driver
-    /* Configure parameters of an UART driver,
-     * communication pins and install the driver */
-    uart_config_t uart_config = {
-        .baud_rate = ECHO_UART_BAUD_RATE,
-        .data_bits = UART_DATA_8_BITS,
-        .parity    = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
-    int intr_alloc_flags = 0;
-
-#if CONFIG_UART_ISR_IN_IRAM
-    intr_alloc_flags = ESP_INTR_FLAG_IRAM;
-#endif
-
-    ESP_ERROR_CHECK(uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE * 2, 0, 0, NULL, intr_alloc_flags));
-    ESP_ERROR_CHECK(uart_param_config(ECHO_UART_PORT_NUM, &uart_config));
-    ESP_ERROR_CHECK(uart_set_pin(ECHO_UART_PORT_NUM, ECHO_TEST_TXD, ECHO_TEST_RXD, ECHO_TEST_RTS, ECHO_TEST_CTS));
+	ctrlSwitch = !ctrlSwitch;
+    ESP_LOGI(TAG, "Switch value: %d\n", ctrlSwitch);
 }
-/*---------------------------------------------------------------
-        UART FreeRTOS Task Function
----------------------------------------------------------------*/
-static void uart_task(void *arg) //recieve data from handmodule
+void btn_press_short_callback()
 {
-    // Configure a temporary buffer for the incoming data
-    uint8_t *data = (uint8_t *) malloc(BUF_SIZE);
+	//do nothing 
+}
 
-    while (1) {
-        // Read data from the UART
-        int len = uart_read_bytes(ECHO_UART_PORT_NUM, data, (BUF_SIZE - 1), 20 / portTICK_PERIOD_MS);
-        // Write data back to the UART
-        uart_write_bytes(ECHO_UART_PORT_NUM, (const char *) data, len);
-        if (len) {
-            data[len] = '\0';
+void btn_release_callback()
+{   
+    //thực hiện gửi tín hiệu mqtt đến wifi module hotspot
+    //publish mqtt tại đây
+    if(ctrlSwitch == 1)
+    {
+        msg_id = esp_mqtt_client_publish(client, "/device/signal/", (const char*)&enableNoticeData, 0,0,0); //send en   able message
+        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);    
+    } else if (ctrlSwitch == 0)
+    {
+        msg_id = esp_mqtt_client_publish(client, "/device/signal/", (const char*)&disableNoticeData, 0,0,0); //send disable message
+        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);  
+    }
+    gpio_set_level(LED_CTRL_PIN, ctrlSwitch); 
+}
 
-            //ESP_LOGI(TAG, "Recv str: %s", (char*)data);
+void btn_press_timeout_callback()
+{
+	//do nothing 
+}
 
-            if(data[0] == '0'||data[0] == '1'||data[0] == '2'||data[0] == '3'||data[0] == '4'||data[0] == '5'||data[0] == '6'||data[0] == '7'||data[0] == '8')
-            {
-                strcpy((char*)ctrlData,(char*)data);
-                ESP_LOGI(TAG, "Ctrl data: %s", (char*)ctrlData);
-            }
-        }
-        vTaskDelay(1/portTICK_PERIOD_MS);
+static void handleButton(void *arg)
+{
+    while(1)
+    {
+        //------------------ Loc nhieu ------------------------
+        //đọc pin nút nhấn cần xử lý
+	    uint8_t sta = gpio_get_level(EN_BTN_PIN);
+        //ESP_LOGI(TAG, "button state: %d\n", sta);
+	    if(sta != btn_filter)
+	    {   
+            //ESP_LOGI(TAG, "hi\n");
+		    btn_filter = sta;
+		    is_debouncing = 1;
+		    time_deboune = esp_timer_get_time(); // ở đây đang lấy thời gian hiện tại
+	    }
+	    //------------------ Tin hieu da xac lap------------------------
+	    if(is_debouncing && (esp_timer_get_time() - time_deboune >= 15))
+	    {
+		    btn_current = btn_filter;
+		    is_debouncing = 0;
+	    }
+	    //---------------------Xu li nhan nha------------------------
+	    if(btn_current != btn_last)
+	    {	
+		    if(btn_current == 1)//nhan xuong
+		    {	
+			    //printf("1 Button current: %d\n", btn_current);
+			    is_press_timeout = 1;
+                //hàm xử lý khi nhấn nút ở tốc độ bình thường
+			    btn_pressing_callback();
+			    time_start_press = esp_timer_get_time();
+		    }
+		    else //nha nut
+		    {
+			    if(esp_timer_get_time() - time_start_press <= 1000) 
+			    {   
+                    //hàm xử lý khi nhấn nút nhanh
+				    //btn_press_short_callback();
+			    }
+			    //printf("0 Button current: %d\n", btn_current);
+			    //printf("1 Button last: %d\n", btn_last);
+                //hàm xử lý khi nhả nút
+			    btn_release_callback(); //khi nhả nút ra thì hiện tại không làm gì
+		    }
+		    btn_last = btn_current;
+	    }
+	    //-------------Xu li nhan giu----------------
+	    if(is_press_timeout && (esp_timer_get_time() - time_start_press >= 3000))
+	    {   
+            //hàm xử lý khi nhấn đè nút
+		    //btn_press_timeout_callback();
+		    is_press_timeout =0;
+	    }
+        vTaskDelay(10/portTICK_PERIOD_MS);
     }
 }
 
@@ -367,10 +465,10 @@ void handleText (const void *arg_text) {
     {   
         if(text[strIndex] == ' ')                                                                                                                                                                                                  
         {
-            if(spaceCount < 3)
+            if(spaceCount < 2)
             {
                 spaceCount++;
-            } else if (spaceCount==3)
+            } else if (spaceCount==2)
             {
                 text[strIndex] = '\n';
                 spaceCount = 0;
@@ -396,30 +494,37 @@ static void displayText_task(void *arg)
                 task_ssd1306_display_text(bufferText1,I2C_MASTER_NUM);
                 break;
             case '2':
+                task_ssd1306_display_clear(I2C_MASTER_NUM);
                 handleText(bufferText2);
                 task_ssd1306_display_text(bufferText2,I2C_MASTER_NUM);
                 break;
             case '3':
+                task_ssd1306_display_clear(I2C_MASTER_NUM);
                 handleText(bufferText3);
                 task_ssd1306_display_text(bufferText3,I2C_MASTER_NUM);
                 break;
             case '4':
+                task_ssd1306_display_clear(I2C_MASTER_NUM);
                 handleText(bufferText4);
                 task_ssd1306_display_text(bufferText4,I2C_MASTER_NUM);
                 break;
             case '5':
+                task_ssd1306_display_clear(I2C_MASTER_NUM);
                 handleText(bufferText5);
                 task_ssd1306_display_text(bufferText5,I2C_MASTER_NUM);
                 break;
             case '6':
+                task_ssd1306_display_clear(I2C_MASTER_NUM);
                 handleText(bufferText6);
                 task_ssd1306_display_text(bufferText6,I2C_MASTER_NUM);
                 break;
             case '7':
+                task_ssd1306_display_clear(I2C_MASTER_NUM);
                 handleText(bufferText7);
                 task_ssd1306_display_text(bufferText7,I2C_MASTER_NUM);
                 break;
             case '8':
+                task_ssd1306_display_clear(I2C_MASTER_NUM);
                 handleText(bufferText8);
                 task_ssd1306_display_text(bufferText8,I2C_MASTER_NUM);
                 break;
@@ -508,13 +613,15 @@ static void getBufferChange_task(void *arg)
     }
 }
 
-
-
 void app_main(void)
 {
+    gpio_set_direction(LED_CTRL_PIN, GPIO_MODE_OUTPUT);   //init led 
+    gpio_set_direction(EN_BTN_PIN, GPIO_MODE_INPUT);
+
     uart_init();
     i2c_master_init();
     ssd1306_init(I2C_MASTER_NUM);
+    task_ssd1306_display_clear(I2C_MASTER_NUM);
 
     ESP_LOGI(TAG, "[APP] Startup..");
     ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
@@ -541,7 +648,9 @@ void app_main(void)
     mqtt_app_start();
 
     task_ssd1306_display_clear(I2C_MASTER_NUM);
-    xTaskCreate(uart_task, "uart_rx_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL);
+	
+	xTaskCreate(uart_task, "uart_echo_task", ECHO_TASK_STACK_SIZE, NULL, 10, NULL);
+    xTaskCreate(handleButton, "button_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL);
     xTaskCreate(displayText_task,"display_test_task",1024*2, NULL, configMAX_PRIORITIES-1, NULL);
     xTaskCreate(getBufferChange_task,"get_buffer_change",1024*2, NULL, configMAX_PRIORITIES-1, NULL);
 }
