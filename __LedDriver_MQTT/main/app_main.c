@@ -705,7 +705,7 @@ static void ledRGB_task(void *arg)
                     //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
                     //chuyển đèn sang màu cam
                     for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
-                        ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 255, 255,255));
+                        ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 254, 80,0));
                     }
                     ESP_ERROR_CHECK(led_strip_refresh(led_strip));
                     break;
@@ -901,8 +901,8 @@ static void handleLedSwMode_task(void *arg) //control led driver using data from
                                 case 6: //purple
                                     ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 160, 32, 240));
                                     break;
-                                case 7: //white
-                                    ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 255, 255, 255));
+                                case 7: //orange
+                                    ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 254, 80,0));
                                     break;
                                 default:
                                     break;
