@@ -1,11 +1,15 @@
 #define ena   13     // ENA ==> GPIO 13     
 #define enb   14     // ENB ==> GPIO 14    
 #define in1  15      // IN1 ==> GPIO 15
-#define in2  16      // IN2 ==> GPIO 16   
-#define in3  17      // IN3 ==> GPIO 17     
+#define in2  25      // IN2 ==> GPIO 16  new: 25 
+#define in3  35      // IN3 ==> GPIO 17  new: 35   
 #define in4  18      // IN4 ==> GPIO 18     
-#define led 4        // LED ==> GPIO 4
+#define led 27        // LED ==> GPIO 4 new : 2
 #define servoPin 19 // Servo ==> GPIO 19
+
+#define EN_LED_PIN 2
+#define EN_BTN_PIN 33
+
 #include <PubSubClient.h>
 #include <WiFi.h>
 #include <NTPClient.h>
@@ -17,10 +21,7 @@
 #define MQTT_USER "Jw92hp0jnKbNhP0aN4wcJMQUE5emGzVdVU618Ualu9YzONzpHTsev6ZY218yqTA9" //username
 #define MQTT_PASSWORD "" //password
 #define MQTT_TOPIC_TX "/device/signal/" //topic to transmit enable/ disable control signal to hotspot module
-#define MQTT_TOPIC_RX "/device/car" //topic to recieve data control after send enable data to hotspot module
-
-#define EN_LED_PIN 27
-#define EN_BTN_PIN 33
+#define MQTT_TOPIC_RX "/device/car/" //topic to recieve data control after send enable data to hotspot module
 
 const char* ssid = "Ngo Van Hoa";
 const char* password = "25021971";
@@ -31,9 +32,9 @@ PubSubClient client(wifiClient);
 //button handle variable
 bool is_debouncing = false;
 unsigned long int time_debounce = 0;
-int button_filter = 0;
-int button_current = 0;
-int button_last = 0;
+int button_filter = 1;
+int button_current = 1;
+int button_last = 1;
 unsigned long int previousMillis = 0;
 
 bool switchCtrl = false;
@@ -64,22 +65,21 @@ void button_handle(void)
 	//-------- Xu ly nut nhan --------
 	if(button_current != button_last)
 	{
-		if(button_current == 1) //press button case
+		if(button_current == 0) //press button case
 		{
       //do something when button pressed
       switchCtrl = !switchCtrl;
-      //Serial.println("press");
+      Serial.println("press");
 		} else { //release button case
       //do something when button released
       if(switchCtrl == true)
       {
-        //Serial.println("release true");
+        Serial.println("release true");
         digitalWrite(EN_LED_PIN, HIGH);
         client.publish(MQTT_TOPIC_TX,String("2").c_str(),true); //car enable signal
-
       } else if (switchCtrl == false)
       {
-        //Serial.println("release false");
+        Serial.println("release false");
         digitalWrite(EN_LED_PIN, LOW);
         client.publish(MQTT_TOPIC_TX,String("1").c_str(),true); 
       }   
@@ -121,8 +121,10 @@ void connect_to_broker(){
   }
   
 }
-
+//Debug section - Serial.print()..
+int countState = 0;
 //int ready = 1;
+//Dang bi bug nhap nhang dieu khien doan nay
 void callback(char* topic, byte *payload, unsigned int length) {
   //Serial.println("-------new message from broker-----");
   //Serial.print("topic: ");
@@ -130,87 +132,111 @@ void callback(char* topic, byte *payload, unsigned int length) {
   //Serial.print("\nmessage: ");
   //Serial.write(payload, length);
 
-  //Debug section - Serial.print()..
-  int countState = 0;
-  //check payload
-  if(String(topic) == "/device/car/")//check topic mode
-  { 
-    switch(countState)
-    {
-      case 0: //dashboard state
-        if((char)payload[0] == '0')
-        {
-          countState = 1;
-        } else if ((char)payload[0] == '1')
-        {
-          countState = 2;
-        } else if ((char)payload[0] == '2')
-        {
-          countState = 3;
+  if(switchCtrl == true)
+  {
+    //check payload
+    if(String(topic) == "/device/car/")//check topic mode
+    { 
+      switch(countState)
+      {
+        case 0: //dashboard state
+          if((char)payload[0] == '0')
+          {
+            countState = 1;
+            Serial.println("CountState: ");
+            Serial.println("1");
+          } else if ((char)payload[0] == '1')
+          {
+            countState = 2;
+            Serial.println("CountState: ");
+            Serial.println("2");
+          } else if ((char)payload[0] == '2')
+          {
+            countState = 3;
+            Serial.println("CountState: ");
+            Serial.println("3");
+          }
+          break;
+        case 1: //control servo state
+          if((char)payload[0] == '0')
+          {
+            Serial.println("S0");
+            MyServo.write(0);
+          } else if ((char)payload[0] == '1')
+          {
+            Serial.println("S1");
+            MyServo.write(90);
+          } else if ((char)payload[0] == '2')
+          {
+            Serial.println("S2");
+            MyServo.write(180);
+          } else if ((char)payload[0] == '8')
+          {
+            Serial.println("back to dashboard");
+            countState = 0;
+            //MyServo.write(180);
+          } 
+          break;
+        case 2: //conrol led state
+          if((char)payload[0] == '0') //turn on led
+          {
+            Serial.println("off");
+            digitalWrite(led, LOW); //- có thời gian thì add rồi enable hoạt động cho đèn xe sau
+          } else if ((char)payload[0] == '1') //turn off led
+          {
+            Serial.println("on");
+            digitalWrite(led, HIGH);
+          } else if ((char)payload[0] == '8')
+          {
+            Serial.println("back to dashboard");
+            countState = 0;
+          //MyServo.write(180);
+          }
+          break;
+        case 3: //control motor DC
+          if((char)payload[0] == '0') //backward
+          {
+            Serial.println("B");
+            BACKWARD();
+          } else if ((char)payload[0] == '1') //forward
+          {
+            Serial.println("F");
+            FORWARD();
+          } else if ((char)payload[0] == '2') //turn left
+          {
+            Serial.println("L");
+
+            TURN_LEFT();
+          } else if ((char)payload[0] == '3') //turn right
+          {
+            Serial.println("R");
+
+            TURN_RIGHT();
+          } else if ((char)payload[0] == '4') //stop motor
+          {
+            Serial.println("S");
+
+            STOP();
+          } else if ((char)payload[0] == '8')
+          {
+            Serial.println("back to dashboard");
+            countState = 0;
+          }
+          break;
         }
-        break;
-      case 1: //control servo state
-        if((char)payload[0] == '0')
-        {
-          Serial.println("S0");
-          MyServo.write(0);
-        } else if ((char)payload[0] == '1')
-        {
-          Serial.println("S1");
-          MyServo.write(90);
-        } else if ((char)payload[0] == '2')
-        {
-          Serial.println("S2");
-          MyServo.write(180);
-        }
-        break;
-      case 2: //conrol led state
-        if((char)payload[0] == '0') //turn on led
-        {
-          Serial.println("off");
-          //digitalWrite(led, LOW); - có thời gian thì add rồi enable hoạt động cho đèn xe sau
-        } else if ((char)payload[0] == '1') //turn off led
-        {
-          Serial.println("on");
-          //digitalWrite(led, HIGH);
-        }
-        break;
-      default: //error motor state
-        if((char)payload[0] == '0') //backward
-        {
-          Serial.print("B");
-          Serial.println(ledState);
-          BACKWARD();
-        } else if ((char)payload[0] == '1') //forward
-        {
-          Serial.print("F");
-          Serial.println(ledState);
-          FORWARD();
-        } else if ((char)payload[0] == '2') //turn left
-        {
-          Serial.print("L");
-          //Serial.println(ledState);
-          TURN_LEFT();
-        } else if ((char)payload[0] == '3') //turn right
-        {
-          Serial.print("R");
-          //Serial.println(ledState);
-          TURN_RIGHT();
-        } else if ((char)payload[0] == '4') //stop motor
-        {
-          Serial.print("S");
-          Serial.println(ledState);
-          STOP();
-        }
-        break;
-    }
+      } else if (switchCtrl == false) {
+        //do nothing
+        //(char)payload[0] == '8';
+        //Serial.println("Pay load: ");
+        //Serial.println('8');
+      }
   }
 }
 
 
 void setup()
 {
-  pinMode(EN_BTN_PIN,INPUT); //0v on | >0v off
+  pinMode(EN_BTN_PIN,INPUT_PULLUP); //0v on | >0v off
   pinMode(EN_LED_PIN,OUTPUT); //init led pin gpio
   /* initialize motor control pins as output */
   pinMode(ena, OUTPUT);
@@ -221,7 +247,7 @@ void setup()
   pinMode(in4, OUTPUT);
   pinMode(led, OUTPUT);
   MyServo.attach(servoPin);
-  MyServo.write(90);
+  MyServo.write(0);
   Serial.begin(115200);
   
   setup_wifi();
@@ -235,10 +261,14 @@ void setup()
 void loop()
 {   
   client.loop();
-  if (!client.connected()) {
+  if(!client.connected()) {
     connect_to_broker();
   }
   button_handle();
+  //MyServo.write(90);
+  //delay(1000);
+  //MyServo.write(180);
+  //delay(1000);
 } 
 
 void STOP(){
@@ -250,7 +280,7 @@ void STOP(){
 void BACKWARD(){
   analogWrite(ena, 100);
   digitalWrite(in1, HIGH);
-  digitalWrite(in2, LOW); 
+  digitalWrite(in2, LOW);
   analogWrite(enb, 100); 
   digitalWrite(in3, HIGH);
   digitalWrite(in4, LOW);
