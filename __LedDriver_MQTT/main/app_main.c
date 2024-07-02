@@ -8,7 +8,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "protocol_examples_common.h"
-#include "driver/ledc.h"
+//#include "driver/ledc.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -33,43 +33,46 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 
-/*---------------------------------------------------------------
-        LED RGB General Macros
----------------------------------------------------------------*/
-typedef enum{
-    RGBLED_OFF, //0 
-    RGBLED_RED, //1
-    RGBLED_GREEN, //2
-    RGBLED_BLUE, //3
-    RGBLED_YELLOW, //4
-    RGBLED_CYAN, //5 
-    RGBLED_PURPLE, //6
-    RGBLED_WHITE, //7
-    /*3 chân đèn màu chủ đạo: Red, Green, Blue ===> tối đa 8 trạng thái đèn*/
-}ledRGB_Status;
+#include "esp_timer.h"
 
-typedef struct {
-    gpio_num_t redGPIONum;
-    gpio_num_t blueGPIONum;
-    gpio_num_t greenGPIONum;
-    ledRGB_Status ledState;
-}rgbLedTypDef;
+#include "driver/rmt_tx.h"
+#include "led_strip_encoder.h"
 
-#define LEDC_TIMER              LEDC_TIMER_0
-#define LEDC_MODE               LEDC_HIGH_SPEED_MODE //Default: Low speed
+#include "led_strip_rmt.h"
+#include "led_strip_types.h"
+#include "led_strip.h"
 
-#define LEDC_CHANNEL_RED            LEDC_CHANNEL_0
-#define LEDC_CHANNEL_GREEN          LEDC_CHANNEL_1
-#define LEDC_CHANNEL_BLUE           LEDC_CHANNEL_2
-//independence: Channel Analog, co the dung chung timer 
-#define LEDC_DUTY_RES           LEDC_TIMER_13_BIT // Set duty resolution to 13 bits
-#define LEDC_FREQUENCY          (4000) // Frequency in Hertz. Set frequency at 4 kHz
 
-/* Warning:
- * For ESP32, ESP32S2, ESP32S3, ESP32C3, ESP32C2, ESP32C6, ESP32H2, ESP32P4 targets,
-    * when LEDC_DUTY_RES selects the maximum duty resolution (i.e. value equal to SOC_LEDC_TIMER_BIT_WIDTH),
- * 100% duty cycle is not reachable (duty cannot be set to (2 ** SOC_LEDC_TIMER_BIT_WIDTH)).
- */
+// GPIO assignment
+#define LED_STRIP_GPIO  0
+// Numbers of the LED in the strip
+#define LED_STRIP_LED_NUMBERS 60
+// 10MHz resolution, 1 tick = 0.1us (led strip needs a high resolution) 10MHz resolution, 1 tick = 0.1us (led strip needs a high resolution)
+#define LED_STRIP_RMT_RES_HZ  (10 * 1000 * 1000)
+
+#define EXAMPLE_CHASE_SPEED_MS      500
+
+//static uint8_t led_strip_pixels[LED_STRIP_LED_NUMBERS * 3]; - khi nao code toi kia thi open ra
+
+#define LED_CTRL_PIN 27
+#define EN_BTN_PIN 33
+
+//button sẽ có task thay đổi biến trạng thái nút bấm nhờ vào việc nhấn cứ mỗi lần nhận lệnh bấm nút thì đảo trạng thái 
+//enable - disable
+
+uint8_t buttonState = 0;
+uint8_t btn_current = 1;
+uint8_t btn_last = 1;
+
+uint8_t btn_filter = 1;
+uint8_t is_debouncing;
+uint32_t time_deboune;
+uint32_t time_start_press;
+uint8_t is_press_timeout;
+
+uint8_t ctrlSwitch = 0; //0 disable 1 enable
+uint8_t enableNoticeData = '3'; //dieu chinh lai ma ID data cho led RGB
+uint8_t disableNoticeData = '1';
 
 /*---------------------------------------------------------------
         UART General Macros
@@ -88,14 +91,8 @@ typedef struct {
 /*---------------------------------------------------------------
         GPIO General Macros
 ---------------------------------------------------------------*/
-#define GPIO_REDLED GPIO_NUM_23
-#define GPIO_GREENLED GPIO_NUM_21
-#define GPIO_BLUELED GPIO_NUM_18
-#define GPIO_VOLTAGE GPIO_NUM_5
-
 #define GPIO_NRLED GPIO_NUM_25
 #define GPIO_NBLED GPIO_NUM_26
-#define GPIO_NGLED GPIO_NUM_27
 
 /*****************************************MQTT VARIABLES***************************************************************************/
 static esp_mqtt_client_handle_t client;
@@ -114,12 +111,20 @@ uint32_t LedNState = 0;
 uint8_t chooseLedFlag = 0;
 uint8_t tempFlag = 0;
 
-rgbLedTypDef rgbLed1;
 
 uint8_t ledState = 0;
 uint8_t countState = 0;
 uint8_t ledDrvOpt = 1;
-uint8_t stopClrSptrFlg = 0;
+
+uint8_t ledOptTaskFlg = 0;
+
+led_strip_handle_t led_strip; //init ledstrip var
+
+rmt_channel_handle_t led_chan = NULL;
+rmt_encoder_handle_t led_encoder = NULL;
+rmt_transmit_config_t tx_config = {
+        .loop_count = 0, // no transfer loop
+};
 
 /*****************************************LED DRIVER GENERAL VARIABLES***************************************************************************/
 /*****************************************FUNCTIONS PROTOTYPE***************************************************************************/
@@ -134,69 +139,101 @@ void gpio_init(void)
    //notice led gpio init 
    gpio_reset_pin(GPIO_NRLED);
    gpio_reset_pin(GPIO_NBLED);
-   gpio_reset_pin(GPIO_NGLED);
    //set the gpio push/ pull output
    gpio_set_direction(GPIO_NRLED,GPIO_MODE_OUTPUT);
    gpio_set_direction(GPIO_NBLED,GPIO_MODE_OUTPUT);
-   gpio_set_direction(GPIO_NGLED,GPIO_MODE_OUTPUT);
 }
 
 /*****************************************GPIO FUNCT END***************************************************************************/
-/*****************************************UART FUNCT BEGIN***************************************************************************/
 /*---------------------------------------------------------------
-        UART General Functions
+        Button Functions
 ---------------------------------------------------------------*/
-void uart_init(void)
+void btn_pressing_callback()
 {
-    //UART driver
-    /* Configure parameters of an UART driver,
-     * communication pins and install the driver */
-    uart_config_t uart_config = {
-        .baud_rate = ECHO_UART_BAUD_RATE,
-        .data_bits = UART_DATA_8_BITS,
-        .parity    = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
-    int intr_alloc_flags = 0;
-
-#if CONFIG_UART_ISR_IN_IRAM
-    intr_alloc_flags = ESP_INTR_FLAG_IRAM;
-#endif
-
-    ESP_ERROR_CHECK(uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE * 2, 0, 0, NULL, intr_alloc_flags));
-    ESP_ERROR_CHECK(uart_param_config(ECHO_UART_PORT_NUM, &uart_config));
-    ESP_ERROR_CHECK(uart_set_pin(ECHO_UART_PORT_NUM, ECHO_TEST_TXD, ECHO_TEST_RXD, ECHO_TEST_RTS, ECHO_TEST_CTS));
+	ctrlSwitch = !ctrlSwitch;
+    ESP_LOGI(TAG, "Switch value: %d\n", ctrlSwitch);
 }
-/*---------------------------------------------------------------
-        UART FreeRTOS Task Function
----------------------------------------------------------------*/
-static void uart_task(void *arg) //recieve data from handmodule
+void btn_press_short_callback()
 {
-    // Configure a temporary buffer for the incoming data
-    uint8_t *data = (uint8_t *) malloc(BUF_SIZE);
+	//do nothing 
+}
+void btn_release_callback()
+{   
+    //thực hiện gửi tín hiệu mqtt đến wifi module hotspot
+    //publish mqtt tại đây
+    if(ctrlSwitch == 1)
+    {
+        msg_id = esp_mqtt_client_publish(client, "/device/signal/", "3", 0,0,0); //send en   able message
+        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);    
+    } else if (ctrlSwitch == 0 )
+    {
+        msg_id = esp_mqtt_client_publish(client, "/device/signal/", "1", 0,0,0); //send disable message
+        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);  
+    }
+    gpio_set_level(LED_CTRL_PIN, ctrlSwitch); 
+}
+void btn_press_timeout_callback()
+{
+	//do nothing 
+}
 
-    while (1) {
-        // Read data from the UART
-        int len = uart_read_bytes(ECHO_UART_PORT_NUM, data, (BUF_SIZE - 1), 20 / portTICK_PERIOD_MS);
-        // Write data back to the UART
-        uart_write_bytes(ECHO_UART_PORT_NUM, (const char *) data, len);
-        if (len) {
-            data[len] = '\0';
-
-            //ESP_LOGI(TAG, "Recv str: %s", (char*)data);
-
-            if(data[0] == '0'||data[0] == '1'||data[0] == '2'||data[0] == '3'||data[0] == '4'||data[0] == '5'||data[0] == '6'||data[0] == '7'||data[0] == '8')
-            {
-                strcpy((char*)ctrlData,(char*)data);
-                ESP_LOGI(TAG, "Ctrl data: %s", (char*)ctrlData);
-            }
-        }
-        vTaskDelay(1/portTICK_PERIOD_MS);
+static void handleButton(void *arg)
+{
+    while(1)
+    {
+        //------------------ Loc nhieu ------------------------
+        //đọc pin nút nhấn cần xử lý
+	    uint8_t sta = gpio_get_level(EN_BTN_PIN);
+        //ESP_LOGI(TAG, "button state: %d\n", sta);
+	    if(sta != btn_filter)
+	    {   
+            //ESP_LOGI(TAG, "hi\n");
+		    btn_filter = sta;
+		    is_debouncing = 1;
+		    time_deboune = esp_timer_get_time(); // ở đây đang lấy thời gian hiện tại
+	    }
+	    //------------------ Tin hieu da xac lap------------------------
+	    if(is_debouncing && (esp_timer_get_time() - time_deboune >= 15))
+	    {
+		    btn_current = btn_filter;
+		    is_debouncing = 0;
+	    }
+	    //---------------------Xu li nhan nha------------------------
+	    if(btn_current != btn_last)
+	    {	
+		    if(btn_current == 0)//nhan xuong
+		    {	
+			    //printf("1 Button current: %d\n", btn_current);
+			    is_press_timeout = 1;
+                //hàm xử lý khi nhấn nút ở tốc độ bình thường
+			    btn_pressing_callback();
+			    time_start_press = esp_timer_get_time();
+		    }
+		    else //nha nut
+		    {
+			    if(esp_timer_get_time() - time_start_press <= 1000) 
+			    {   
+                    //hàm xử lý khi nhấn nút nhanh
+				    //btn_press_short_callback();
+			    }
+			    //printf("0 Button current: %d\n", btn_current);
+			    //printf("1 Button last: %d\n", btn_last);
+                //hàm xử lý khi nhả nút
+			    btn_release_callback(); //khi nhả nút ra thì hiện tại không làm gì
+		    }
+		    btn_last = btn_current;
+	    }
+	    //-------------Xu li nhan giu----------------
+	    if(is_press_timeout && (esp_timer_get_time() - time_start_press >= 3000))
+	    {   
+            //hàm xử lý khi nhấn đè nút
+		    //btn_press_timeout_callback();
+		    is_press_timeout =0;
+	    }
+        vTaskDelay(10/portTICK_PERIOD_MS);
     }
 }
-/*****************************************UART FUNCT END***************************************************************************/
+
 /*****************************************MQTT FUNCT BEGIN***************************************************************************/
 static void mqttInit(void)
 {
@@ -248,15 +285,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         msg_id = esp_mqtt_client_publish(client, "/ledrgb/mode", "data_3", 0, 1, 0);
         //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
         
-        //msg_id = esp_mqtt_client_subscribe(client, "/topic/qos0", 0);
+        msg_id = esp_mqtt_client_subscribe(client, "/device/ledrgb/", 0);
         //ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
 
-        //msg_id = esp_mqtt_client_subscribe(client, "/topic/qos1", 1);
-        //ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
-
-        //msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
-        //ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
-        break;
     case MQTT_EVENT_DISCONNECTED:
         //ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
         break;
@@ -274,11 +305,41 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
     case MQTT_EVENT_DATA:
         ESP_LOGI(TAG, "MQTT_EVENT_DATA");
-        //printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
-        //printf("DATA=%.*s\r\n", event->data_len, event->data);
+        printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
+        printf("DATA=%.*s\r\n", event->data_len, event->data);
 
         sprintf(read_topic,"%.*s",event->topic_len,event->topic);
         sprintf(read_data,"%.*s",event->data_len,event->data);
+        
+        if(strcmp((const char*)read_topic,"/device/ledrgb/")==0) //nhận tín hiệu từ thiết bị điều khiển
+        {   
+            switch (ctrlSwitch)
+            {
+                case 0:
+                    /* code - viec enable/disable nhan tin hieu tu ben thiet bi dieu khien de bao hieu
+                        1. init gpio chan den
+                        2. on off den tai day
+                    */
+                    //off den enable
+                    break;
+                case 1:
+                    if(strcmp((const char*)read_data,"0")==0 || strcmp((const char*)read_data,"1")==0 ||
+                    strcmp((const char*)read_data,"2")==0 || strcmp((const char*)read_data,"3")==0 || 
+                    strcmp((const char*)read_data,"4")==0 || strcmp((const char*)read_data,"5")==0 ||
+                    strcmp((const char*)read_data,"6")==0 || strcmp((const char*)read_data,"7")==0 ||
+                    strcmp((const char*)read_data,"8")==0)
+                    {
+                        //copy chuỗi vừa nhận được vào control Data
+                        strcpy((char*)ctrlData,(char*)read_data);
+                        ESP_LOGI(TAG, "Ctrl data recieve: %s", (char*)ctrlData);
+                        //in ra debug thử xem nhận được đúng dữ liệu không
+                    } 
+                    /* code */
+                    break;
+                default: //error case
+                    break;
+            }
+        }
         break;
     case MQTT_EVENT_ERROR:
         ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -316,179 +377,109 @@ void mqtt_app_start(void)
     esp_mqtt_client_start(client);
 }
 /*****************************************MQTT FUNCT END***************************************************************************/
-/*****************************************LED RGB FUNCT BEGIN***************************************************************************/
-void ledc_init(uint8_t channelCtrl, int gpio_numCtrl)
-{   
-    // Prepare and then apply the LEDC PWM timer configuration
-    ledc_timer_config_t ledc_timer = {
-        .speed_mode       = LEDC_MODE,
-        .duty_resolution  = LEDC_DUTY_RES,
-        .timer_num        = LEDC_TIMER,
-        .freq_hz          = LEDC_FREQUENCY,  // Set output frequency at 4 kHz
-        .clk_cfg          = LEDC_AUTO_CLK
-    };
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
-
-    // Prepare and then apply the LEDC PWM channel configuration
-    ledc_channel_config_t ledc_channel = {
-        .speed_mode     = LEDC_MODE,
-        .channel        = channelCtrl,
-        .timer_sel      = LEDC_TIMER,
-        .intr_type      = LEDC_INTR_DISABLE,
-        .gpio_num       = gpio_numCtrl,
-        .duty           = 0, // Set duty to 0%
-        .hpoint         = 0
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
-}
-
-void genPWM_RGB(ledc_channel_t channel, uint32_t duty)
-{   
-    // Set duty to x%
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, channel, duty));
-    // Update duty to apply the new value
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, channel));
-}
-
-void showRGB(int color)
+/*****************************************LED STRIP FUNCT START ***************************************************************************/
+led_strip_handle_t configure_led(void)
 {
-    int redPWM;
-	int greenPWM;
-	int bluePWM;
- 
-	if (color <= 255)          // phân vùng 1
-	{
-		redPWM = 255 - color;    // red đi từ sáng về tắt
-		greenPWM = color;        // green đi từ tắt thành sáng
-		bluePWM = 0;             // blue luôn tắt
-	}
-	else if (color <= 511)     // phân vùng 2
-	{
-		redPWM = 0;                     // đỏ luôn tắt
-		greenPWM = 255 - (color - 256); // green đi từ sáng về tắt
-		bluePWM = (color - 256);        // blue đi từ tắt thành sáng
-	}
-	else // color >= 512       // phân vùng 3
-	{
-		redPWM = (color - 512);         // red tắt rồi lại sáng
-		greenPWM = 0;                   // green luôn tắt nhé
-		bluePWM = 255 - (color - 512);  // blue sáng rồi lại tắt
-	}
+    // LED strip general initialization, according to your led board design
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = LED_STRIP_GPIO,   // The GPIO that connected to the LED strip's data line
+        .max_leds = LED_STRIP_LED_NUMBERS,        // The number of LEDs in the strip,
+        .led_pixel_format = LED_PIXEL_FORMAT_GRB, // Pixel format of your LED strip
+        .led_model = LED_MODEL_WS2812,            // LED strip model
+        .flags.invert_out = false,                // whether to invert the output signal
+    };
 
-    redPWM = map(redPWM,0,255,8192,0);
-    greenPWM = map(greenPWM,0,255,8192,0);
-    bluePWM = map(bluePWM,0,255,8192,0);
- 
-	//xuất xung ra 
-    genPWM_RGB(LEDC_CHANNEL_RED, redPWM);
-    genPWM_RGB(LEDC_CHANNEL_GREEN, greenPWM);
-    genPWM_RGB(LEDC_CHANNEL_BLUE, bluePWM);
+    // LED strip backend configuration: RMT
+    led_strip_rmt_config_t rmt_config = {
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 0, 0)
+        .rmt_channel = 0,
+#else
+        .clk_src = RMT_CLK_SRC_DEFAULT,        // different clock source can lead to different power consumption
+        .resolution_hz = LED_STRIP_RMT_RES_HZ, // RMT counter clock frequency
+        .flags.with_dma = false,               // DMA feature is available on ESP target like ESP32-S3
+#endif
+    };
+
+    // LED Strip object handle
+    led_strip_handle_t led_strip;
+    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
+    ESP_LOGI(TAG, "Created LED strip object with RMT backend");
+    return led_strip;
 }
 
-long map(long x, long in_min, long in_max, long out_min, long out_max) {
-  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
-}
-
-esp_err_t initLedRGB(rgbLedTypDef* rgbLedX)
-{   
-    /* Set the GPIO as a push/pull output */
-    gpio_set_direction(rgbLedX->redGPIONum, GPIO_MODE_OUTPUT);
-    gpio_set_direction(rgbLedX->greenGPIONum, GPIO_MODE_OUTPUT);
-    gpio_set_direction(rgbLedX->blueGPIONum, GPIO_MODE_OUTPUT);
-
-    //rgbLedX->ledState = RGBLED_OFF; //default led state init
-
-    return ESP_OK;
-}
-
-esp_err_t resetGPIOInit(rgbLedTypDef* rgbLedX,gpio_num_t red_gpio, gpio_num_t green_gpio, gpio_num_t blue_gpio)
+uint8_t ledStrip_init (void)
 {
-    rgbLedX->redGPIONum = red_gpio;
-    rgbLedX->greenGPIONum = green_gpio;
-    rgbLedX->blueGPIONum = blue_gpio;
-
-    gpio_reset_pin(rgbLedX->redGPIONum);
-    gpio_reset_pin(rgbLedX->greenGPIONum);
-    gpio_reset_pin(rgbLedX->blueGPIONum);
-
-    return ESP_OK;
-}
-
-esp_err_t ledc_initRGB(rgbLedTypDef* rgbLedX)
-{   
-    ledc_init(LEDC_CHANNEL_RED,rgbLedX->redGPIONum); //init angalog PWM pinn
-    ledc_init(LEDC_CHANNEL_GREEN,rgbLedX->greenGPIONum);
-    ledc_init(LEDC_CHANNEL_BLUE,rgbLedX->blueGPIONum);
-
-    return ESP_OK;
-}
-
-void showSpectrum (void) //auto color spectrum funct
-    {   
-    uint16_t i = 0;
-    for (; i < 768; i++)
-	{
-		showRGB(i);  // Call RGBspectrum() with our new x
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-	}
-}
-
-void handle_RgbLedState(rgbLedTypDef* rgbLedX, ledRGB_Status rgbLedState)
-{   
-    rgbLedX->ledState = rgbLedState;
-    switch (rgbLedX->ledState)
+    led_strip_handle_t led_strip = configure_led(); //init led driver ws2812
+    if(!led_strip)
     {
-        case RGBLED_OFF:
-            gpio_set_level(rgbLedX->redGPIONum,1);
-            gpio_set_level(rgbLedX->greenGPIONum,1);
-            gpio_set_level(rgbLedX->blueGPIONum,1);
-            break;
-        case RGBLED_RED:
-            gpio_set_level(rgbLedX->redGPIONum,0);
-            gpio_set_level(rgbLedX->greenGPIONum,1);
-            gpio_set_level(rgbLedX->blueGPIONum,1);
-            break;
-        case RGBLED_GREEN:
-            gpio_set_level(rgbLedX->redGPIONum,1);
-            gpio_set_level(rgbLedX->greenGPIONum,0);
-            gpio_set_level(rgbLedX->blueGPIONum,1);
-            break;
-        case RGBLED_BLUE:
-            gpio_set_level(rgbLedX->redGPIONum,1);
-            gpio_set_level(rgbLedX->greenGPIONum,1);
-            gpio_set_level(rgbLedX->blueGPIONum,0);
-            break;
-        case RGBLED_YELLOW:
-            gpio_set_level(rgbLedX->redGPIONum,0);
-            gpio_set_level(rgbLedX->greenGPIONum,0);
-            gpio_set_level(rgbLedX->blueGPIONum,1);
-            break;
-        case RGBLED_CYAN:
-            gpio_set_level(rgbLedX->redGPIONum,1);
-            gpio_set_level(rgbLedX->greenGPIONum,0);
-            gpio_set_level(rgbLedX->blueGPIONum,0);
-            break;
-        case RGBLED_PURPLE:
-            gpio_set_level(rgbLedX->redGPIONum,0);
-            gpio_set_level(rgbLedX->greenGPIONum,1);
-            gpio_set_level(rgbLedX->blueGPIONum,0);
-            break;
-        case RGBLED_WHITE:
-            gpio_set_level(rgbLedX->redGPIONum,0);
-            gpio_set_level(rgbLedX->greenGPIONum,0);
-            gpio_set_level(rgbLedX->blueGPIONum,0);
-            break;
-        default:    //trường hợp error, giá trị trạng thái đèn rác
-            break;
+        return 1; //error case
+    } else return 0; //normal case
+}
+/**
+ * @brief Simple helper function, converting HSV color space to RGB color space
+ *
+ * Wiki: https://en.wikipedia.org/wiki/HSL_and_HSV
+ *
+ */
+void led_strip_hsv2rgb(uint32_t h, uint32_t s, uint32_t v, uint32_t *r, uint32_t *g, uint32_t *b)
+{
+    h %= 360; // h -> [0,360]
+    uint32_t rgb_max = v * 2.55f;
+    uint32_t rgb_min = rgb_max * (100 - s) / 100.0f;
+
+    uint32_t i = h / 60;
+    uint32_t diff = h % 60;
+
+    // RGB adjustment amount by hue
+    uint32_t rgb_adj = (rgb_max - rgb_min) * diff / 60;
+
+    switch (i) {
+    case 0:
+        *r = rgb_max;
+        *g = rgb_min + rgb_adj;
+        *b = rgb_min;
+        break;
+    case 1:
+        *r = rgb_max - rgb_adj;
+        *g = rgb_max;
+        *b = rgb_min;
+        break;
+    case 2:
+        *r = rgb_min;
+        *g = rgb_max;
+        *b = rgb_min + rgb_adj;
+        break;
+    case 3:
+        *r = rgb_min;
+        *g = rgb_max - rgb_adj;
+        *b = rgb_max;
+        break;
+    case 4:
+        *r = rgb_min + rgb_adj;
+        *g = rgb_min;
+        *b = rgb_max;
+        break;
+    default:
+        *r = rgb_max;
+        *g = rgb_min;
+        *b = rgb_max - rgb_adj;
+        break;
+    }
+}
+/*****************************************LED STRIP FUNCT END ***************************************************************************/
+void ledStrip_ColorCtrl(int ledNum, int red, int green, int blue)
+{   
+    int i = 0;
+    for (; i < ledNum; i++) {
+        ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, red, green, blue)); //neu gia tri khong dung thi them &
     }
 }
 /*****************************************LED RGB FUNCT END***************************************************************************/
 /*****************************************LED DRIVER TASKS BEGIN***************************************************************************/
-uint8_t ledOptTaskFlg = 0;
+
 
 static void blink_led(void) {      
     gpio_set_level(GPIO_NRLED,LedNState);
-    gpio_set_level(GPIO_NGLED,LedNState);
     gpio_set_level(GPIO_NBLED,LedNState);
     LedNState = !LedNState;
 }
@@ -497,10 +488,18 @@ static void handleColorOpt(void) {
 
     if(tempFlag==0)
     {   
-        resetGPIOInit(&rgbLed1,GPIO_REDLED, GPIO_GREENLED,GPIO_BLUELED);
-        initLedRGB(&rgbLed1);
-        handle_RgbLedState(&rgbLed1, RGBLED_OFF);
+        gpio_set_level(GPIO_NRLED,1);
+        gpio_set_level(GPIO_NBLED,0);
+        led_strip = configure_led(); //init led driver ws2812
+        if(!led_strip)
+        {
+            ESP_LOGE(TAG,"install WS2812 driver failed\n");
+        } else if (led_strip)
+        {
+            ESP_LOGE(TAG,"install WS2812 driver success\n");
+        }
         tempFlag = 1;
+        //if để init đèn của chế độ 1 lần 
     }
 
     switch(ctrlData[0])
@@ -553,19 +552,82 @@ static void handleColorOpt(void) {
             break;
         case '8':
             if(chooseLedFlag == 1) {
-                handle_RgbLedState(&rgbLed1,RGBLED_OFF);
+                //clear tắt đèn
+                //ESP_ERROR_CHECK(led_strip_clear(led_strip));
                 //quay ve trang thai chon che do
-                countState = 0;
                 ESP_LOGI(TAG,"comebacktodashboard");
-                chooseLedFlag = 0;
+                //chooseLedFlag = 0;
                 tempFlag = 0;
-                ledState = 0;
                 ledOptTaskFlg = 0;
+                //ledState = 0;
+                countState = 0;
+                //ledState = 0;
+                ledDrvOpt = 1;
+                for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                    ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 0, 0, 0));
+                }
+                ESP_ERROR_CHECK(led_strip_refresh(led_strip));
+                ESP_ERROR_CHECK(led_strip_clear(led_strip));
             }
         default:
             break;
     }
 }
+
+const uint8_t lights[360]={
+  0,   0,   0,   0,   0,   1,   1,   2, 
+  2,   3,   4,   5,   6,   7,   8,   9, 
+ 11,  12,  13,  15,  17,  18,  20,  22, 
+ 24,  26,  28,  30,  32,  35,  37,  39, 
+ 42,  44,  47,  49,  52,  55,  58,  60, 
+ 63,  66,  69,  72,  75,  78,  81,  85, 
+ 88,  91,  94,  97, 101, 104, 107, 111, 
+114, 117, 121, 124, 127, 131, 134, 137, 
+141, 144, 147, 150, 154, 157, 160, 163, 
+167, 170, 173, 176, 179, 182, 185, 188, 
+191, 194, 197, 200, 202, 205, 208, 210, 
+213, 215, 217, 220, 222, 224, 226, 229, 
+231, 232, 234, 236, 238, 239, 241, 242, 
+244, 245, 246, 248, 249, 250, 251, 251, 
+252, 253, 253, 254, 254, 255, 255, 255, 
+255, 255, 255, 255, 254, 254, 253, 253, 
+252, 251, 251, 250, 249, 248, 246, 245, 
+244, 242, 241, 239, 238, 236, 234, 232, 
+231, 229, 226, 224, 222, 220, 217, 215, 
+213, 210, 208, 205, 202, 200, 197, 194, 
+191, 188, 185, 182, 179, 176, 173, 170, 
+167, 163, 160, 157, 154, 150, 147, 144, 
+141, 137, 134, 131, 127, 124, 121, 117, 
+114, 111, 107, 104, 101,  97,  94,  91, 
+ 88,  85,  81,  78,  75,  72,  69,  66, 
+ 63,  60,  58,  55,  52,  49,  47,  44, 
+ 42,  39,  37,  35,  32,  30,  28,  26, 
+ 24,  22,  20,  18,  17,  15,  13,  12, 
+ 11,   9,   8,   7,   6,   5,   4,   3, 
+  2,   2,   1,   1,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0, 
+  0,   0,   0,   0,   0,   0,   0,   0};
+
+int rgb_red=0;
+int rgb_green=120;
+int rgb_blue=240;
+
+int ledColor_red = 5;
+int ledColor_green = 0;
+int ledColor_blue = 0;
 
 static void ledRGB_task(void *arg)
 {
@@ -577,42 +639,75 @@ static void ledRGB_task(void *arg)
                 case 0:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "8", 0, 0, 0);
                     //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
-                    handle_RgbLedState(&rgbLed1,RGBLED_OFF);
+                    //tắt đèn - clear den
+                    for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                            ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 0, 0, 0));
+                    }
+                    ESP_ERROR_CHECK(led_strip_refresh(led_strip));
+                    ESP_ERROR_CHECK(led_strip_clear(led_strip));
                     break;
                 case 1:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "1", 0, 0, 0);
                     //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
-                    handle_RgbLedState(&rgbLed1,RGBLED_RED);
+                    //chuyển đèn sang màu đỏ
+                    for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                        ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 255, 0, 0));
+                    }
+                    ESP_ERROR_CHECK(led_strip_refresh(led_strip));
                     break;
                 case 2:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "2", 0, 0, 0);
                     //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
-                    handle_RgbLedState(&rgbLed1,RGBLED_GREEN);
+                    //chuyển đèn sang màu xanh lá
+                    for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                        ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 0, 255, 0));
+                    }
+                    ESP_ERROR_CHECK(led_strip_refresh(led_strip));
                     break;
                 case 3:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "3", 0, 0, 0);
                     //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
-                    handle_RgbLedState(&rgbLed1,RGBLED_BLUE);
+                    //chuyển đèn sang màu xanh biển
+                    for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                        ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 0, 0, 255));
+                    }
+                    ESP_ERROR_CHECK(led_strip_refresh(led_strip));
                     break;
                 case 4:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "4", 0, 0, 0);
                     //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
-                    handle_RgbLedState(&rgbLed1,RGBLED_YELLOW);
+                    //chuyển đèn sang màu vàng
+                    for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                        ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 255, 255, 0));
+                    }
+                    ESP_ERROR_CHECK(led_strip_refresh(led_strip));
                     break;
                 case 5:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "5", 0, 0, 0);
                     //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
-                    handle_RgbLedState(&rgbLed1,RGBLED_CYAN);
+                    //chuyển đèn sang màu xanh lam
+                    for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                        ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 0, 255, 255));
+                    }
+                    ESP_ERROR_CHECK(led_strip_refresh(led_strip));
                     break;
                 case 6:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "6", 0, 0, 0);
                     //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
-                    handle_RgbLedState(&rgbLed1,RGBLED_PURPLE);
+                    //chuyển đèn sang màu tím
+                    for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                        ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 160, 32, 240));
+                    }
+                    ESP_ERROR_CHECK(led_strip_refresh(led_strip));
                     break;
                 case 7:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "7", 0, 0, 0);
                     //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
-                    handle_RgbLedState(&rgbLed1,RGBLED_WHITE);
+                    //chuyển đèn sang màu cam
+                    for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                        ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 255, 255,255));
+                    }
+                    ESP_ERROR_CHECK(led_strip_refresh(led_strip));
                     break;
                 default:
                     break;
@@ -622,54 +717,31 @@ static void ledRGB_task(void *arg)
     }
 }
 
-static void handleColorSpectr(void) {        
-    gpio_set_level(GPIO_NRLED,0);
-    gpio_set_level(GPIO_NBLED,1);
-    gpio_set_level(GPIO_NGLED,0);
-
-    if(tempFlag==0)
-    {   
-        handle_RgbLedState(&rgbLed1, RGBLED_OFF);
-        resetGPIOInit(&rgbLed1,GPIO_REDLED, GPIO_GREENLED,GPIO_BLUELED);
-        ledc_initRGB(&rgbLed1);
-
-        genPWM_RGB(LEDC_CHANNEL_RED, 8192); //off led trước khi thoát chế độ
-        genPWM_RGB(LEDC_CHANNEL_GREEN, 8192);
-        genPWM_RGB(LEDC_CHANNEL_BLUE, 8192);
-        tempFlag = 1;
+void rainbowLedStrip_handle(void)
+{
+    for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+        ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i,ledColor_red, ledColor_green, ledColor_blue));
     }
+    ESP_ERROR_CHECK(led_strip_refresh(led_strip));
+    ledColor_red   = lights[rgb_red];
+    ledColor_green = lights[rgb_green];
+    ledColor_blue = lights[rgb_blue];
 
-    if(ctrlData[0]=='8'&&stopClrSptrFlg==1) //cu chi tay thoat che do
-    {   
-        genPWM_RGB(LEDC_CHANNEL_RED, 8192); //off led trước khi thoát chế độ
-        genPWM_RGB(LEDC_CHANNEL_GREEN, 8192);
-        genPWM_RGB(LEDC_CHANNEL_BLUE, 8192);
-        //ve dashboard
-        //chay task dasboard
-        countState = 0;
-        stopClrSptrFlg = 0;
-    }
+    rgb_red += 1;
+    rgb_green += 1;
+    rgb_blue += 1;
 
-    //operation led
-    uint16_t i = 0;
-    for (; i < 768; i++)
-	{   
-        if(ctrlData[0] == '8')  {
-            stopClrSptrFlg = 1;
-            break;
-        }
-		showRGB(i);  // Call RGBspectrum() with our new x
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-	} //show spectrum
-    
+    if (rgb_red >= 360) rgb_red=0;
+    if (rgb_green >= 360) rgb_green=0;
+    if (rgb_blue >= 360) rgb_blue=0;
+
 }
-
-
+static uint8_t s_led_state = 0;
 static void handleLedSwMode_task(void *arg) //control led driver using data from hand module
 {  
     while(1)
     {   
-        nvs_handle_t countState_handle;
+       /*  nvs_handle_t countState_handle;
         nvs_handle_t ledState_handle;
         nvs_handle_t ledDrvOpt_handle;
                                             
@@ -696,9 +768,10 @@ static void handleLedSwMode_task(void *arg) //control led driver using data from
         // Read
         err_countState = nvs_get_u8(countState_handle, "count_state", &countState);
 
+
         err_ledState = nvs_get_u8(ledState_handle, "led_state", &ledState);
 
-        err_ledDrvOpt = nvs_get_u8(ledDrvOpt_handle, "leddriver_opt", &ledDrvOpt);
+        err_ledDrvOpt = nvs_get_u8(ledDrvOpt_handle, "leddriver_opt", &ledDrvOpt); */
       
         if(countState == 0)
         {   
@@ -709,6 +782,8 @@ static void handleLedSwMode_task(void *arg) //control led driver using data from
 
             msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "8", 0, 0, 0);
             //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+            //chừng nào nút bấm nhận thì mới cho phép nhận Control Datas
+
             switch(ctrlData[0])
             {   
                 case '1':
@@ -720,22 +795,33 @@ static void handleLedSwMode_task(void *arg) //control led driver using data from
                     ledDrvOpt = 2;
                     countState = 1;
                     break;
+                case '3':
+                    ledDrvOpt = 3;
+                    countState = 1;
                 default:
                     break;
             }
         } else if(countState == 1)
-        {
+        {   
+            //ESP_LOGI(TAG,"Counstate current value: %d and counstate error val: %d\n", countState, err_countState);
+            //ESP_LOGI(TAG,"Led driver option value: %d\n", ledDrvOpt);
             switch (ledDrvOpt)
-            {   
+            {  
                 case 1: 
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/mode/", "1", 0, 0, 0);
-                    //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
-                    gpio_set_level(GPIO_NRLED,1);
-                    gpio_set_level(GPIO_NBLED,0);
-                    gpio_set_level(GPIO_NGLED,0);
-
                     //thuc hien chon mau tai day
                     handleColorOpt(); //callback funct chon mau
+                    if (ctrlData[0] == '8')
+                    {
+                        countState = 0;
+                        //ledState = 0;
+                        ledDrvOpt = 1;
+                        for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                            ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 0, 0, 0));
+                        }
+                        ESP_ERROR_CHECK(led_strip_refresh(led_strip));
+                        ESP_ERROR_CHECK(led_strip_clear(led_strip));
+                    }
                     break;
                 case 2:
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/mode/", "2", 0, 0, 0);
@@ -743,15 +829,112 @@ static void handleLedSwMode_task(void *arg) //control led driver using data from
 
                     msg_id = esp_mqtt_client_publish(client, "/ledrgb/color/", "9", 0, 0, 0); //change app to rgb picture
                     //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
-                    //thuc hien color spectrum tai day
-                    handleColorSpectr(); //callback funct color spectrum
+                    //gọi hàm chạy led chaser led dây RGB
+                    //operation led
+                    //countState = 0;
+                    //ledState = 0;
+                    //ledDrvOpt = 1;
+                    //gpio_set_level(GPIO_NRLED,0);
+                    //gpio_set_level(GPIO_NBLED,1 );
+                    if(tempFlag==0)
+                    {   
+                        gpio_set_level(GPIO_NRLED,0);
+                        gpio_set_level(GPIO_NBLED,1 );
+                        led_strip = configure_led(); //init led driver ws2812
+                        if(!led_strip)
+                        {
+                            ESP_LOGE(TAG,"install WS2812 driver failed\n");
+                        }
+                        tempFlag = 1;
+                        //if để init đèn của chế độ 1 lần 
+                    }
+                    rainbowLedStrip_handle();
+
+                    if (ctrlData[0] == '8')
+                    {
+                        countState = 0;
+                        //ledState = 0;
+                        ledDrvOpt = 1;
+                        for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                            ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 0, 0, 0));
+                        }
+                        ESP_ERROR_CHECK(led_strip_refresh(led_strip));
+                        ESP_ERROR_CHECK(led_strip_clear(led_strip));
+                    }
+                    break;
+                case 3: //blink
+                    msg_id = esp_mqtt_client_publish(client, "/ledrgb/mode/", "3", 0, 0, 0);
+                    //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+                    if(tempFlag==0)
+                    {   
+                        gpio_set_level(GPIO_NRLED,1);
+                        gpio_set_level(GPIO_NBLED,1 );
+                        led_strip = configure_led(); //init led driver ws2812
+                        if(!led_strip)
+                        {
+                            ESP_LOGE(TAG,"install WS2812 driver failed\n");
+                        }
+                        tempFlag = 1;
+                    }
+                    /* If the addressable LED is enabled */
+                    if (s_led_state) {
+                        /* Set the LED pixel using RGB from 0 (0%) to 255 (100%) for each color */
+                        for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                            //ESP_LOGI(TAG,"Led State: %d", ledState);
+                            switch(ledState)
+                            {
+                                case 1: //red
+                                    ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 255, 0, 0));
+                                    break;
+                                case 2: //green
+                                    ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 0, 255, 0));
+                                    break;
+                                case 3: //blue
+                                    ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 0, 0, 255));
+                                    break;
+                                case 4: //yellow
+                                    ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 255, 255, 0));
+                                    break;
+                                case 5: //cyan
+                                    ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 0, 255, 255));
+                                    break;
+                                case 6: //purple
+                                    ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 160, 32, 240));
+                                    break;
+                                case 7: //white
+                                    ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 255, 255, 255));
+                                    break;
+                                default:
+                                    break;
+                            }
+                            /* Refresh the strip to send data */
+                            led_strip_refresh(led_strip);
+                        }             
+                    } else {
+                        for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                            /* Set all LED off to clear all pixels */
+                            led_strip_clear(led_strip);
+                        }   
+                    }
+                    s_led_state = !s_led_state;
+                    if (ctrlData[0] == '8')
+                    {
+                        countState = 0;
+                        //ledState = 0;
+                        ledDrvOpt = 1;
+                        for (int i = 0; i < LED_STRIP_LED_NUMBERS; i++) {
+                            ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, 0, 0, 0));
+                        }
+                        ESP_ERROR_CHECK(led_strip_refresh(led_strip));
+                        ESP_ERROR_CHECK(led_strip_clear(led_strip));
+                    }
                     break;
                 default:
                     break;
             }
         }
     
-
+/* 
         err_countState = nvs_set_u8(countState_handle, "count_state", countState);
         err_countState = nvs_commit(countState_handle);
 
@@ -764,14 +947,13 @@ static void handleLedSwMode_task(void *arg) //control led driver using data from
         // Close
         nvs_close(countState_handle);
         nvs_close(ledState_handle);
-        nvs_close(ledDrvOpt);
+        nvs_close(ledDrvOpt); */ //đảm bảo chức năng rồi thêm flash sau, thêm ko được nữa thì bỏ
 
-        vTaskDelay(300/portTICK_PERIOD_MS);
+        vTaskDelay(250/portTICK_PERIOD_MS);
     }
 }
 
-//Ngay code va khong lam gi ngoai dev + test Flash: 01/05/2024
-//Test va kiem tra dieu chinh truyen nhan giua Raspberry Pi + ESP32: 28/04/2024 - 30/04/2024
+
 /*****************************************LED DRIVER TASKS END***************************************************************************/
 
 
@@ -784,19 +966,22 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
-    ESP_ERROR_CHECK( ret );
+    ESP_ERROR_CHECK( ret ); 
     
+    gpio_set_direction(LED_CTRL_PIN, GPIO_MODE_OUTPUT);   //init led 
+    gpio_set_direction(EN_BTN_PIN, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(EN_BTN_PIN,  GPIO_PULLUP_ONLY);
+
     mqttInit();
-    uart_init();
     gpio_init();
 
     ESP_ERROR_CHECK(example_connect());
 
     mqtt_app_start();
 
+    xTaskCreate(handleButton, "button_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL);
     xTaskCreate (ledRGB_task,"ledRgb_task", ECHO_TASK_STACK_SIZE, NULL, 10, NULL);
-    xTaskCreate(uart_task, "uart_echo_task", ECHO_TASK_STACK_SIZE, NULL, 10, NULL);
-    xTaskCreate(handleLedSwMode_task, "handle_LEDdriver_task", ECHO_TASK_STACK_SIZE, NULL, 10, NULL);
+    xTaskCreate(handleLedSwMode_task, "handle_LEDdriver_task", ECHO_TASK_STACK_SIZE, NULL, configMAX_PRIORITIES-1, NULL); //nguyen nhan
 }
 
 
